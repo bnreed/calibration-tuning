@@ -1,6 +1,7 @@
 import logging
 import os
 import glob
+import csv
 from enum import Enum
 import numpy as np
 from datasets import load_dataset, Features, Value, DatasetDict
@@ -19,6 +20,15 @@ CSV_DATASET_FEATURES = Features(
         "query_label": Value("int32"),
     }
 )
+
+CSV_DATASET_DEFAULTS = {
+    "context": "",
+    "target": "",
+    "target_prompt": "",
+    "prompt": "",
+    "output": "",
+    "query_label": -1,
+}
 
 
 class DatasetSizeRatio(float, Enum):
@@ -41,6 +51,9 @@ def get_offline(
 ):
     data_files = {}
     embeddings = {}
+
+    print("**************************************************************")
+    print(f"Searching for offline dataset in {root}")
     for split_name in ["train", "validation", "test"]:
         if os.path.isdir(f"{root}/{split_name}"):
             data_files[split_name] = glob.glob(f"{root}/{split_name}/*.csv")
@@ -48,14 +61,68 @@ def get_offline(
             if os.path.isfile(f"{root}/{split_name}/embedding.npy"):
                 embeddings[split_name] = np.load(f"{root}/{split_name}/embedding.npy")
 
-    dataset = load_dataset("csv", data_files=data_files, features=CSV_DATASET_FEATURES)
+    print(f"Loading offline dataset from {root} with files: {data_files}")
+
+    def _collect_present_features():
+        present_columns = set()
+
+        for split_paths in data_files.values():
+            for path in split_paths:
+                with open(path, newline="") as f:
+                    reader = csv.reader(f)
+                    header = next(reader, [])
+                present_columns.update(header)
+
+        ordered_columns = [
+            column_name
+            for column_name in CSV_DATASET_FEATURES.keys()
+            if column_name in present_columns
+        ]
+
+        return Features(
+            {column_name: CSV_DATASET_FEATURES[column_name] for column_name in ordered_columns}
+        )
+
+    dataset = load_dataset(
+        "csv",
+        data_files=data_files,
+        features=_collect_present_features(),
+    )
     if not use_cache:
         dataset.cleanup_cache_files()
 
+    def _ensure_columns(ds):
+        for column_name, default_value in CSV_DATASET_DEFAULTS.items():
+            if column_name not in ds.column_names:
+                ds = ds.add_column(column_name, [default_value] * len(ds))
+        return ds
+
+    dataset = DatasetDict(
+        {
+            split: _ensure_columns(ds)
+            for split, ds in dataset.items()
+        }
+    )
+
     dataset = dataset.map(
-        lambda x: {k: "" if v is None else v for k, v in x.items()},
+        lambda x: {
+            k: (CSV_DATASET_DEFAULTS[k] if v is None else v)
+            for k, v in x.items()
+        },
         num_proc=num_workers,
     )
+
+    dataset = dataset.map(
+        lambda x: {
+            "query_label": (
+                int(x["query_label"])
+                if str(x["query_label"]).strip() != ""
+                else CSV_DATASET_DEFAULTS["query_label"]
+            )
+        },
+        num_proc=num_workers,
+    )
+    dataset = dataset.cast(CSV_DATASET_FEATURES)
 
     if load_embeddings and len(set(dataset.keys()) - set(embeddings.keys())) == 0:
         dataset = DatasetDict(
