@@ -21,6 +21,22 @@ from llm.models import get_model
 from llm.utils.generate_utils import generate_output
 
 
+os.environ["TRANSFORMERS_VERBOSITY"]    = "info"
+
+
+# # Damnedable issues with stability and segfaulting. Setting environment variables appears to help but def takes a hit on inference speed.
+# os.environ['CUDA_LAUNCH_BLOCKING']      = '1'
+# os.environ['PYTHONFAULTHANDLER']        = '1'
+# os.environ['TORCH_USE_CUDA_DSA']        = '1'
+# os.environ['PYTORCH_CUDA_ALLOC_CONF']   = "expandable_segments:True,max_split_size_mb:512"
+# # Disable tokenizer parallelism - can cause threading issues leading to segfaults
+# os.environ['TOKENIZERS_PARALLELISM']    = 'false'
+# # Disable torch compile/JIT - forces interpreter mode which is more stable
+# os.environ['TORCH_COMPILE_DISABLE']     = '1'
+# # Control thread usage to avoid oversubscription
+# os.environ['OMP_NUM_THREADS']           = '4'
+# os.environ['MKL_NUM_THREADS']           = '4'
+
 @entrypoint(with_accelerator=True)
 def generate_outputs_main(
     accelerator=None,
@@ -33,8 +49,15 @@ def generate_outputs_main(
     use_dataset_cache=True,
     batch_size=1,
     model_name=None,
+    use_local_model=False,
+    model_dir=None,
     max_new_tokens=30,
+    int8=False,
+    attn_implementation="eager",
 ):
+    if use_local_model and not model_dir:
+        raise ValueError("When --use-local-model=True, you must set --model-dir.")
+
     config = {
         "seed": seed,
         "log_dir": log_dir,
@@ -43,6 +66,8 @@ def generate_outputs_main(
         "kshot": kshot,
         "batch_size": batch_size,
         "model_name": model_name,
+        "use_local_model": use_local_model,
+        "model_dir": model_dir,
         "max_new_tokens": max_new_tokens,
     }
     if accelerator.is_main_process:
@@ -68,7 +93,15 @@ def generate_outputs_main(
             if ds is not None
         ]
 
-    tokenizer, model = get_model(model_name, device_map="auto")
+
+    model_kwargs = {"model_dir": model_dir} if use_local_model else {}
+    tokenizer, model = get_model(
+        model_name,
+        device_map="auto",
+        use_int8=int8,
+        attn_implementation=attn_implementation,
+        **model_kwargs,
+    )
     model.eval()
 
     generation_config = GenerationConfig(
@@ -81,7 +114,7 @@ def generate_outputs_main(
     for split_name, data in data_splits:
         with accelerator.main_process_first():
             if accelerator.is_main_process:
-                os.makedirs(f"{log_dir}/outputs/{split_name}")
+                os.makedirs(f"{log_dir}/outputs/{split_name}", exist_ok=True)
 
         # import pandas as pd
         # pd.DataFrame([data[i] for i in tqdm(range(len(data)))]).to_csv(
@@ -144,8 +177,13 @@ def generate_labels_main(
     use_dataset_cache=True,
     batch_size=1,
     model_name=None,
+    use_local_model=False,
+    model_dir=None,
     strategy=None,  ## substring / fuzzy_gpt-3.5-turbo-1106
 ):
+    if use_local_model and not model_dir:
+        raise ValueError("When --use-local-model=True, you must set --model-dir.")
+
     config = {
         "seed": seed,
         "log_dir": log_dir,
@@ -153,12 +191,15 @@ def generate_labels_main(
         "prompt_style": prompt_style,
         "batch_size": batch_size,
         "model_name": model_name,
+        "use_local_model": use_local_model,
+        "model_dir": model_dir,
         "strategy": strategy,
     }
     if accelerator.is_main_process:
         wandb.config.update(config, allow_val_change=True)
 
-    tokenizer, model = get_model(model_name)
+    model_kwargs = {"model_dir": model_dir} if use_local_model else {}
+    tokenizer, model = get_model(model_name, **model_kwargs)
 
     del model
 
@@ -197,7 +238,7 @@ def generate_labels_main(
         csv_path = f"{log_dir}/labels/{split_name}"
         with accelerator.main_process_first():
             if accelerator.is_main_process:
-                os.makedirs(csv_path)
+                os.makedirs(csv_path, exist_ok=True)
 
         pd.DataFrame(label_generator).to_csv(
             f"{csv_path}/{accelerator.process_index}.csv", index=False
@@ -216,7 +257,12 @@ def generate_embeddings_main(
     use_dataset_cache=True,
     batch_size=1,
     model_name=None,
+    use_local_model=False,
+    model_dir=None,
 ):
+    if use_local_model and not model_dir:
+        raise ValueError("When --use-local-model=True, you must set --model-dir.")
+
     config = {
         "seed": seed,
         "log_dir": log_dir,
@@ -225,11 +271,14 @@ def generate_embeddings_main(
         "kshot": kshot,
         "batch_size": batch_size,
         "model_name": model_name,
+        "use_local_model": use_local_model,
+        "model_dir": model_dir,
     }
     if accelerator.is_main_process:
         wandb.config.update(config, allow_val_change=True)
 
-    embedding_model = get_model(model_name, device_map="auto")
+    model_kwargs = {"model_dir": model_dir} if use_local_model else {}
+    embedding_model = get_model(model_name, device_map="auto", **model_kwargs)
 
     if get_dataset_attrs(dataset).get("collection", False):
         all_datasets = get_dataset(dataset)
