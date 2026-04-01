@@ -3,9 +3,12 @@ from functools import partial
 
 from ..logging import Timer
 from ..datasets import get_dataset, get_loader
+from ..datasets.llm_utils_oe import normalize_comparison_strategy
 from .oe import evaluate_uncertainty_sampling_oe, evaluate_verbal_elicitation_oe
 from .query import evaluate_query, evaluate_query_logits
 from .classifier import evaluate_classifier, evaluate_classifier_logits
+
+DEFAULT_OE_GRADE_STRATEGY = "fuzzy_gpt-3.5-turbo-1106"
 
 EVALUATE_MODE_FN_MAP = {
     "us_oe": evaluate_uncertainty_sampling_oe,
@@ -13,7 +16,7 @@ EVALUATE_MODE_FN_MAP = {
     "query": partial(
         evaluate_query,
         max_new_tokens=100,
-        grade_strategy="fuzzy_gpt-3.5-turbo-1106",
+        grade_strategy=DEFAULT_OE_GRADE_STRATEGY,
     ),
     "query_logits": evaluate_query_logits,
     "query_choice": partial(
@@ -24,7 +27,7 @@ EVALUATE_MODE_FN_MAP = {
     "class": partial(
         evaluate_classifier,
         max_new_tokens=100,
-        grade_strategy="fuzzy_gpt-3.5-turbo-1106",
+        grade_strategy=DEFAULT_OE_GRADE_STRATEGY,
     ),
     "class_logits": evaluate_classifier_logits,
     "class_choice": partial(
@@ -165,7 +168,10 @@ def evaluate_dataset(
     prompt_style=None,
     log_dir=None,
     evaluate_fn=None,
+    grade_strategy=None,
 ):
+    grade_strategy = normalize_comparison_strategy(grade_strategy)
+
     if dataset is not None:
         with accelerator.main_process_first():
             data_splits = get_dataset(
@@ -258,9 +264,35 @@ def evaluate_dataset(
             comparison_strategies = [
                 # "substring",
                 # "fuzzy_gpt-4-0613",
-                "fuzzy_gpt-3.5-turbo-1106",
+                DEFAULT_OE_GRADE_STRATEGY,
             ]
             evaluate_fn = EVALUATE_MODE_FN_MAP["oe"]
+        elif evaluate_fn in {"query", "query_choice", "class", "class_choice"}:
+            if evaluate_fn == "query":
+                evaluate_fn = partial(
+                    evaluate_query,
+                    max_new_tokens=100,
+                    grade_strategy=grade_strategy or DEFAULT_OE_GRADE_STRATEGY,
+                )
+            elif evaluate_fn == "query_choice":
+                evaluate_fn = partial(
+                    evaluate_query,
+                    max_new_tokens=1,
+                    grade_strategy=grade_strategy or "substring",
+                )
+            elif evaluate_fn == "class":
+                evaluate_fn = partial(
+                    evaluate_classifier,
+                    max_new_tokens=100,
+                    grade_strategy=grade_strategy or DEFAULT_OE_GRADE_STRATEGY,
+                )
+            elif evaluate_fn == "class_choice":
+                evaluate_fn = partial(
+                    evaluate_classifier,
+                    max_new_tokens=1,
+                    grade_strategy=grade_strategy or "substring",
+                )
+            comparison_strategies = None
         else:
             assert (
                 evaluate_fn in EVALUATE_MODE_FN_MAP.keys()

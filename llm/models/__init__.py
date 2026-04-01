@@ -15,6 +15,7 @@ def __setup():
     for n in [
         "llama2",
         "llama3",
+        "llama3_1",
         "mlp",
         "mistral",
         "mpnet",
