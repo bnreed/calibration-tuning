@@ -19,6 +19,14 @@ from llm.models.peft.utils import get_last_checkpoint_path
 from llm.trainer import ClassificationTuner, CalibrationTuner, FineTuner
 
 
+def normalize_optional_path(path):
+    if path is None:
+        return None
+
+    path = str(path).strip()
+    return path or None
+
+
 @entrypoint(with_accelerator=True)
 def main(
     accelerator=None,
@@ -31,13 +39,26 @@ def main(
     use_dataset_cache=True,
     embedding_model_name=None,
     model_name=None,
+    use_local_model=False,
+    model_dir=None,
     peft_dir=None,
     query_peft_dir=None,
     scale_temp=None,
     with_classifier=False,
     mode=None,
+    grade_strategy=None,
     batch_size=1,
 ):
+    if use_local_model and not model_dir:
+        raise ValueError("When --use-local-model=True, you must set --model-dir.")
+
+    model_dir = normalize_optional_path(model_dir)
+    peft_dir = normalize_optional_path(peft_dir)
+    query_peft_dir = normalize_optional_path(query_peft_dir)
+
+    if mode in {"query", "query_choice"} and query_peft_dir is None:
+        raise ValueError("`--query-peft-dir` must be set for query evaluation.")
+
     config = dict(
         seed=seed,
         log_dir=log_dir,
@@ -46,17 +67,21 @@ def main(
         eval_kshot=eval_kshot,
         use_dataset_cache=use_dataset_cache,
         model_name=model_name,
+        use_local_model=use_local_model,
+        model_dir=model_dir,
         peft_dir=peft_dir,
         query_peft_dir=query_peft_dir,
         scale_temp=scale_temp,
         with_classifier=with_classifier,
         mode=mode,
+        grade_strategy=grade_strategy,
         batch_size=batch_size,
     )
     if accelerator.is_main_process:
         wandb.config.update(config, allow_val_change=True)
 
-    tokenizer, model = get_model(model_name, device_map="auto")
+    model_kwargs = {"model_dir": model_dir} if use_local_model else {}
+    tokenizer, model = get_model(model_name, device_map="auto", **model_kwargs)
 
     model = get_lora_model(
         model,
@@ -161,7 +186,7 @@ def main(
     model.eval()
 
     if get_dataset_attrs(dataset).get("collection", False):
-        all_datasets = get_dataset(dataset)
+        all_datasets = get_dataset(dataset, root=data_dir)
     else:
         assert dataset is not None, "Missing dataset."
         all_datasets = [dataset]
@@ -182,6 +207,7 @@ def main(
             batch_size=batch_size,
             log_dir=log_dir,
             evaluate_fn=mode,
+            grade_strategy=grade_strategy,
         )
 
         all_metrics += metrics
