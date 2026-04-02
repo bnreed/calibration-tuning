@@ -81,7 +81,7 @@ def get_token_vec(tokenizer, format="roman_choice"):
     return _create_vec(raw_strings)
 
 
-LLAMA_3_SYS_PROMPT = "You are an expert who responds with concise, correct answers. Directly state the answer without phrases like 'the correct answer is'"
+INSTRUCT_SYS_PROMPT = "You are an expert who responds with concise, correct answers. Directly state the answer without phrases like 'the correct answer is'"
 
 
 @dataclass
@@ -103,47 +103,87 @@ class LabeledStringDataCollator:
             return_length=True,
         )
 
+    def _uses_chat_template(self):
+        tokenizer_name = (self.tokenizer.name_or_path or "").lower()
+        return (
+            hasattr(self.tokenizer, "apply_chat_template")
+            and (
+                ("llama-3" in tokenizer_name and "instruct" in tokenizer_name)
+                or ("mistral" in tokenizer_name and "instruct" in tokenizer_name)
+            )
+        )
+
+    def _uses_system_prompt(self):
+        tokenizer_name = (self.tokenizer.name_or_path or "").lower()
+        return (
+            ("llama-3" in tokenizer_name and "instruct" in tokenizer_name)
+            or ("mistral" in tokenizer_name and "instruct" in tokenizer_name)
+        )
+
+    def _chat_messages(self, user_prompt, target=None):
+        messages = []
+
+        if self._uses_system_prompt():
+            messages.append({"role": "system", "content": INSTRUCT_SYS_PROMPT})
+
+        messages.append({"role": "user", "content": user_prompt})
+
+        if target is not None:
+            messages.append({"role": "assistant", "content": str(target)})
+
+        return messages
+
+    def _format_chat_prompt(self, user_prompt, target=None):
+        messages = self._chat_messages(user_prompt, target=target)
+        add_generation_prompt = target is None
+
+        return self.tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=add_generation_prompt,
+        )
+
+    def _base_prompt(self, instance):
+        return str(
+            LMText.from_(
+                {k: v for k, v in instance.items() if k != self.target_name}
+            )
+        )
+
     def __call__(self, instances):
         tokenizer_args = self.get_tokenizer_args(self.tokenizer)
 
-        prompts = [str(LMText.from_(instance)) for instance in instances]
+        has_targets = self.target_name in instances[0]
+        use_chat_template = self._uses_chat_template()
+        base_prompts = [self._base_prompt(instance) for instance in instances]
 
-        if (
-            self.tokenizer.name_or_path
-            and ("Llama-3" in self.tokenizer.name_or_path)
-            and ("Instruct" in self.tokenizer.name_or_path)
-        ):
-            msgs = [
-                [
-                    {"role": "system", "content": LLAMA_3_SYS_PROMPT},
-                    {"role": "user", "content": p},
-                ]
-                for p in prompts
-            ]
-
+        if use_chat_template:
             prompts = [
-                self.tokenizer.apply_chat_template(
-                    m, tokenize=False, add_generation_prompt=True
+                self._format_chat_prompt(
+                    base_prompt,
+                    target=instance.get(self.target_name) if has_targets else None,
                 )
-                for m in msgs
+                for base_prompt, instance in zip(base_prompts, instances)
             ]
+        elif has_targets:
+            prompts = [str(LMText.from_(instance)) for instance in instances]
+        else:
+            prompts = base_prompts
 
         inputs = self.tokenizer(prompts, **tokenizer_args)
         input_lengths = inputs.pop("length")
 
-        if self.target_name in instances[0]:
+        if has_targets:
+            if use_chat_template:
+                un_prompts = [
+                    self._format_chat_prompt(base_prompt)
+                    for base_prompt in base_prompts
+                ]
+            else:
+                un_prompts = base_prompts
+
             ## inputs without targets for labeling lengths.
-            un_inputs = self.tokenizer(
-                [
-                    str(
-                        LMText.from_(
-                            {k: v for k, v in instance.items() if k != self.target_name}
-                        )
-                    )
-                    for instance in instances
-                ],
-                **tokenizer_args,
-            )
+            un_inputs = self.tokenizer(un_prompts, **tokenizer_args)
             un_input_lengths = un_inputs.pop("length")
 
             labels = inputs.get("input_ids").clone()
