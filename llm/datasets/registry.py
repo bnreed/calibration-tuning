@@ -54,14 +54,17 @@ def get_dataset_fn(name):
 
 
 def get_data_dir(data_dir=None):
+    print(f"Data directory before processing: {data_dir}")
     if data_dir is None:
         data_dir = (
             Path(os.environ.get("PROJECT_HOME", Path.home()))
             / Path.cwd().name
             / "datasets"
         )
+        print(f"Data directory not specified. Using default: {data_dir}")
     else:
         data_dir = Path(data_dir)
+        print(f"Data directory specified: {data_dir}")
 
     data_dir.mkdir(parents=True, exist_ok=True)
 
