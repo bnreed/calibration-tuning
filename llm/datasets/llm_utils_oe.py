@@ -27,6 +27,36 @@ def openai_query(system_prompt, prompt, openai_model_name="gpt-3.5-turbo"):
     return sampled_response
 
 
+def normalize_comparison_strategy(comparison_strategy):
+    if comparison_strategy is None:
+        return None
+
+    comparison_strategy = str(comparison_strategy).strip()
+    if len(comparison_strategy) == 0:
+        return None
+
+    if comparison_strategy == "substring":
+        return comparison_strategy
+
+    if comparison_strategy.startswith("fuzzy_"):
+        return comparison_strategy
+
+    return f"fuzzy_{comparison_strategy}"
+
+
+def comparison_strategy_uses_openai(comparison_strategy):
+    comparison_strategy = normalize_comparison_strategy(comparison_strategy)
+    return comparison_strategy not in {None, "substring"}
+
+
+def get_openai_model_name(comparison_strategy):
+    comparison_strategy = normalize_comparison_strategy(comparison_strategy)
+    if comparison_strategy in {None, "substring"}:
+        return None
+
+    return comparison_strategy[len("fuzzy_") :]
+
+
 SYSTEM_PROMPT_ORACLE_EQUIVALENCY = (
     "You are an automated grading assistant helping a teacher grade student answers."
 )
@@ -92,16 +122,18 @@ def grade_oe_preds(
     mode="answer-key",
     max_threads=50,
 ):
+    comparison_strategy = normalize_comparison_strategy(comparison_strategy)
+
     # calculate accuracy
     if comparison_strategy == "substring":
         comparison_fn = lambda t, p, q: t in p
-    elif "fuzzy" in comparison_strategy:
+    elif comparison_strategy is not None and comparison_strategy.startswith("fuzzy_"):
         comparison_fn = lambda t, p, q: evaluate_equivalency_with_oracle(
             t,
             p,
             q,
             oracle_fn=openai_query,
-            oracle_kwargs={"openai_model_name": comparison_strategy.split("_")[1]},
+            oracle_kwargs={"openai_model_name": get_openai_model_name(comparison_strategy)},
             mode=mode,
         )
     else:
